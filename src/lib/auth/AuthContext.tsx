@@ -23,29 +23,44 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<ExtendedUser | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Helper function to load user with wallet
+  const loadUserWithWallet = async (userId: string): Promise<ExtendedUser | null> => {
+    try {
+      const { data: { user: currentUser } } = await supabase.auth.getUser();
+      
+      if (!currentUser) return null;
+
+      // Load wallet from profiles
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('wallet_address')
+        .eq('user_id', userId)
+        .single();
+      
+      const extendedUser = { ...currentUser } as ExtendedUser;
+      
+      if (profile?.wallet_address) {
+        extendedUser.wallet_address = profile.wallet_address;
+      }
+
+      return extendedUser;
+    } catch (error) {
+      console.error('Error loading user with wallet:', error);
+      return null;
+    }
+  };
+
   useEffect(() => {
     const initAuth = async () => {
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
-
         const { data: { session } } = await supabase.auth.getSession();
-        clearTimeout(timeoutId);
         
         if (session?.user) {
-          // Load wallet from profiles
-          const { data: profile } = await supabase
-            .from('profiles')
-            .select('wallet_address')
-            .eq('user_id', session.user.id)
-            .single();
-          
-          if (profile?.wallet_address) {
-            (session.user as any).wallet_address = profile.wallet_address;
-          }
+          const userWithWallet = await loadUserWithWallet(session.user.id);
+          setUser(userWithWallet);
+        } else {
+          setUser(null);
         }
-        
-        setUser(session?.user ?? null);
       } catch (error) {
         console.error('Auth initialization error:', error);
         setUser(null);
@@ -58,18 +73,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       if (session?.user) {
-        // Load wallet from profiles
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('wallet_address')
-          .eq('user_id', session.user.id)
-          .single();
-        
-        if (profile?.wallet_address) {
-          (session.user as any).wallet_address = profile.wallet_address;
-        }
+        const userWithWallet = await loadUserWithWallet(session.user.id);
+        setUser(userWithWallet);
+      } else {
+        setUser(null);
       }
-      setUser(session?.user ?? null);
+      setLoading(false);
     });
 
     return () => subscription.unsubscribe();
@@ -78,6 +87,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signIn = async (email: string, password: string) => {
     try {
       console.log('Attempting sign in for:', email);
+      setLoading(true);
 
       const { data, error } = await supabase.auth.signInWithPassword({
         email,
@@ -91,36 +101,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       console.log('Sign in successful:', data.user?.id);
 
-      // Load wallet address from profiles
+      // Check if profile exists, create if not
       const { data: profile, error: profileError } = await supabase
         .from('profiles')
         .select('wallet_address')
         .eq('user_id', data.user.id)
         .single();
 
-      if (profileError) {
+      if (profileError && profileError.code === 'PGRST116') {
+        // Profile doesn't exist, create it
         console.log('Profile not found, creating...');
         
-        const { error: insertError } = await supabase
+        await supabase
           .from('profiles')
           .insert({
             user_id: data.user.id,
             wallet_address: 'GDPM2NHX3QJ3RX2E4R7VNVHXJ672D474XXVE3ZW5NYVWFF2EXFWYQ5BC',
           });
-
-        if (insertError) {
-          console.error('Profile creation error:', insertError);
-        }
-        
-        (data.user as any).wallet_address = 'GDPM2NHX3QJ3RX2E4R7VNVHXJ672D474XXVE3ZW5NYVWFF2EXFWYQ5BC';
-      } else {
-        console.log('Loaded wallet from profile:', profile.wallet_address);
-        (data.user as any).wallet_address = profile.wallet_address;
       }
 
-      setUser(data.user);
+      // Don't manually set user here - let onAuthStateChange handle it
+      // This prevents race conditions
     } catch (error: any) {
       console.error('Sign in failed:', error);
+      setLoading(false);
       throw error;
     }
   };
