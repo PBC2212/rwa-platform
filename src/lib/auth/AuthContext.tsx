@@ -6,8 +6,12 @@ import { createClient } from '@/lib/supabase/client';
 
 const supabase = createClient();
 
+interface ExtendedUser extends User {
+  wallet_address?: string;
+}
+
 interface AuthContextType {
-  user: User | null;
+  user: ExtendedUser | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -16,7 +20,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<ExtendedUser | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -27,6 +31,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         const { data: { session } } = await supabase.auth.getSession();
         clearTimeout(timeoutId);
+        
+        if (session?.user) {
+          // Load wallet from profiles
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('wallet_address')
+            .eq('user_id', session.user.id)
+            .single();
+          
+          if (profile?.wallet_address) {
+            (session.user as any).wallet_address = profile.wallet_address;
+          }
+        }
         
         setUser(session?.user ?? null);
       } catch (error) {
@@ -39,7 +56,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     initAuth();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.user) {
+        // Load wallet from profiles
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('wallet_address')
+          .eq('user_id', session.user.id)
+          .single();
+        
+        if (profile?.wallet_address) {
+          (session.user as any).wallet_address = profile.wallet_address;
+        }
+      }
       setUser(session?.user ?? null);
     });
 
@@ -62,9 +91,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       console.log('Sign in successful:', data.user?.id);
 
+      // Load wallet address from profiles
       const { data: profile, error: profileError } = await supabase
         .from('profiles')
-        .select('*')
+        .select('wallet_address')
         .eq('user_id', data.user.id)
         .single();
 
@@ -75,12 +105,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           .from('profiles')
           .insert({
             user_id: data.user.id,
-            wallet_address: data.user.user_metadata?.wallet_address || data.user.id,
+            wallet_address: 'GDPM2NHX3QJ3RX2E4R7VNVHXJ672D474XXVE3ZW5NYVWFF2EXFWYQ5BC',
           });
 
         if (insertError) {
           console.error('Profile creation error:', insertError);
         }
+        
+        (data.user as any).wallet_address = 'GDPM2NHX3QJ3RX2E4R7VNVHXJ672D474XXVE3ZW5NYVWFF2EXFWYQ5BC';
+      } else {
+        console.log('Loaded wallet from profile:', profile.wallet_address);
+        (data.user as any).wallet_address = profile.wallet_address;
       }
 
       setUser(data.user);
