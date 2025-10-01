@@ -234,6 +234,60 @@ export interface Database {
         Insert: Omit<Database['public']['Tables']['swaps']['Row'], 'id' | 'created_at'>;
         Update: Partial<Database['public']['Tables']['swaps']['Insert']>;
       };
+      liquidity_pools: {
+        Row: {
+          id: string;
+          pool_id: string;
+          creator_wallet_address: string;
+          asset_a_code: string;
+          asset_a_issuer: string;
+          asset_b_code: string;
+          asset_b_issuer: string | null;
+          total_asset_a: number;
+          total_asset_b: number;
+          total_shares: number;
+          fee_percent: number;
+          status: string;
+          stellar_pool_id: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Omit<Database['public']['Tables']['liquidity_pools']['Row'], 'id' | 'created_at' | 'updated_at'>;
+        Update: Partial<Database['public']['Tables']['liquidity_pools']['Insert']>;
+      };
+      liquidity_positions: {
+        Row: {
+          id: string;
+          pool_id: string;
+          wallet_address: string;
+          shares: number;
+          asset_a_deposited: number;
+          asset_b_deposited: number;
+          earnings_asset_a: number;
+          earnings_asset_b: number;
+          deposit_tx_hash: string | null;
+          last_updated: string;
+          created_at: string;
+        };
+        Insert: Omit<Database['public']['Tables']['liquidity_positions']['Row'], 'id' | 'created_at' | 'last_updated'>;
+        Update: Partial<Database['public']['Tables']['liquidity_positions']['Insert']>;
+      };
+      liquidity_transactions: {
+        Row: {
+          id: string;
+          pool_id: string;
+          wallet_address: string;
+          transaction_type: 'deposit' | 'withdrawal' | 'swap' | 'fee_collection';
+          asset_a_amount: number | null;
+          asset_b_amount: number | null;
+          shares_amount: number | null;
+          tx_hash: string | null;
+          status: 'pending' | 'completed' | 'failed';
+          created_at: string;
+        };
+        Insert: Omit<Database['public']['Tables']['liquidity_transactions']['Row'], 'id' | 'created_at'>;
+        Update: Partial<Database['public']['Tables']['liquidity_transactions']['Insert']>;
+      };
     };
     Functions: {
       get_investment_opportunities: {
@@ -285,6 +339,63 @@ export interface Database {
           created_at: string;
         }[];
       };
+      get_active_liquidity_pools: {
+        Args: Record<string, never>;
+        Returns: {
+          pool_id: string;
+          pool_identifier: string;
+          creator_wallet: string;
+          asset_a_code: string;
+          asset_a_issuer: string;
+          asset_b_code: string;
+          asset_b_issuer: string | null;
+          total_asset_a: number;
+          total_asset_b: number;
+          total_shares: number;
+          fee_percent: number;
+          liquidity_providers_count: number;
+          total_volume_24h: number;
+          created_at: string;
+        }[];
+      };
+      get_user_liquidity_positions: {
+        Args: { _wallet_address: string };
+        Returns: {
+          position_id: string;
+          pool_id: string;
+          pool_identifier: string;
+          asset_a_code: string;
+          asset_b_code: string;
+          shares: number;
+          asset_a_deposited: number;
+          asset_b_deposited: number;
+          current_asset_a_value: number;
+          current_asset_b_value: number;
+          earnings_asset_a: number;
+          earnings_asset_b: number;
+          created_at: string;
+        }[];
+      };
+      get_pool_details: {
+        Args: { _pool_identifier: string };
+        Returns: {
+          pool_id: string;
+          pool_identifier: string;
+          creator_wallet: string;
+          asset_a_code: string;
+          asset_a_issuer: string;
+          asset_b_code: string;
+          asset_b_issuer: string | null;
+          total_asset_a: number;
+          total_asset_b: number;
+          total_shares: number;
+          fee_percent: number;
+          status: string;
+          stellar_pool_id: string | null;
+          liquidity_providers_count: number;
+          created_at: string;
+        }[];
+      };
     };
   };
 }
@@ -307,3 +418,9 @@ export type UserPII = Database['public']['Tables']['user_pii']['Row'];
 export type UserRole = Database['public']['Tables']['user_roles']['Row'];
 export type Swap = Database['public']['Tables']['swaps']['Row'];
 export type InvestmentOpportunity = Database['public']['Functions']['get_investment_opportunities']['Returns'][0];
+export type LiquidityPool = Database['public']['Tables']['liquidity_pools']['Row'];
+export type LiquidityPosition = Database['public']['Tables']['liquidity_positions']['Row'];
+export type LiquidityTransaction = Database['public']['Tables']['liquidity_transactions']['Row'];
+export type ActivePool = Database['public']['Functions']['get_active_liquidity_pools']['Returns'][0];
+export type UserPosition = Database['public']['Functions']['get_user_liquidity_positions']['Returns'][0];
+export type PoolDetails = Database['public']['Functions']['get_pool_details']['Returns'][0];
