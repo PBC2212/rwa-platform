@@ -160,7 +160,9 @@ export const buildWithdrawLiquidityTransaction = async (
 // Build transaction to change trust (required before depositing to a pool)
 export const buildChangeTrustTransaction = async (
   sourceAddress: string,
-  poolId: string,
+  assetA: StellarSDK.Asset,
+  assetB: StellarSDK.Asset,
+  fee: number = 30,
   network: 'testnet' | 'mainnet' = 'testnet'
 ): Promise<string> => {
   const server = getStellarServer(network);
@@ -171,7 +173,19 @@ export const buildChangeTrustTransaction = async (
   try {
     const sourceAccount = await server.loadAccount(sourceAddress);
 
-    const lpAsset = new StellarSDK.LiquidityPoolId(poolId);
+    // Sort assets in lexicographic order
+    const sortedAssets = [assetA, assetB].sort((a, b) => {
+      const aStr = a.isNative() ? 'native' : `${a.getCode()}:${a.getIssuer()}`;
+      const bStr = b.isNative() ? 'native' : `${b.getCode()}:${b.getIssuer()}`;
+      return aStr.localeCompare(bStr);
+    });
+
+    // Create liquidity pool asset
+    const lpAsset = new StellarSDK.LiquidityPoolAsset(
+      sortedAssets[0],
+      sortedAssets[1],
+      StellarSDK.LiquidityPoolFeeV18
+    );
 
     const transaction = new StellarSDK.TransactionBuilder(sourceAccount, {
       fee: StellarSDK.BASE_FEE,
