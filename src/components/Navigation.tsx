@@ -15,11 +15,12 @@ export default function Navigation() {
   }
 
   const navLinks = [
-  { href: '/dashboard', label: 'Dashboard' },
-  { href: '/marketplace', label: 'Marketplace' },
-  { href: '/pledge', label: 'Pledge Asset' },
-  { href: '/admin', label: 'Admin' },
-];
+    { href: '/dashboard', label: 'Dashboard' },
+    { href: '/marketplace', label: 'Marketplace' },
+    { href: '/pledge', label: 'Pledge Asset' },
+    { href: '/liquidity', label: 'Liquidity Pools' },
+    { href: '/admin', label: 'Admin' },
+  ];
 
   async function handleSignOut() {
     try {
@@ -41,7 +42,7 @@ export default function Navigation() {
                 key={link.href}
                 href={link.href}
                 className={`inline-flex items-center px-3 py-2 text-sm font-medium transition-colors ${
-                  pathname === link.href
+                  pathname === link.href || pathname?.startsWith(link.href + '/')
                     ? 'text-blue-600 border-b-2 border-blue-600'
                     : 'text-gray-700 hover:text-blue-600'
                 }`}

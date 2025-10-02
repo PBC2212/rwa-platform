@@ -37,11 +37,19 @@ export const getLiquidityPoolId = (
   assetB: StellarSDK.Asset,
   fee: number = 30
 ): string => {
+  // Stellar requires assets to be in lexicographic order
+  // Compare assets and sort them
+  const sortedAssets = [assetA, assetB].sort((a, b) => {
+    const aStr = a.isNative() ? 'native' : `${a.getCode()}:${a.getIssuer()}`;
+    const bStr = b.isNative() ? 'native' : `${b.getCode()}:${b.getIssuer()}`;
+    return aStr.localeCompare(bStr);
+  });
+
   return StellarSDK.getLiquidityPoolId(
     'constant_product',
     {
-      assetA: assetA,
-      assetB: assetB,
+      assetA: sortedAssets[0],
+      assetB: sortedAssets[1],
       fee: fee
     }
   ).toString('hex');
