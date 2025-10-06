@@ -7,6 +7,11 @@ import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import * as StellarSDK from '@stellar/stellar-sdk';
 import { getLiquidityPoolId, getPlatAsset, getNativeAsset } from '@/lib/stellar/liquidity';
+import { 
+  triggerInitialLiquidity, 
+  discoverLiquiditySources,
+  getAggregatedPrice 
+} from '@/lib/stellar/liquidityAggregator';
 
 const supabase = createClient();
 
@@ -14,20 +19,59 @@ export default function CreatePoolPage() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const [aggregatorStatus, setAggregatorStatus] = useState<string>('');
+  const [discoveredSources, setDiscoveredSources] = useState<number>(0);
+  const [showAggregatorDetails, setShowAggregatorDetails] = useState(false);
   const [formData, setFormData] = useState({
     assetBCode: 'XLM',
     assetBIssuer: '',
     initialAssetA: '',
     initialAssetB: '',
-    feePercent: '0.3'
+    feePercent: '0.3',
+    enableBootstrap: true,
+    bootstrapAmount: '1000' // Target liquidity in USD
   });
 
   const ISSUER_ADDRESS = process.env.NEXT_PUBLIC_STELLAR_ISSUER_SECRET 
     ? StellarSDK.Keypair.fromSecret(process.env.NEXT_PUBLIC_STELLAR_ISSUER_SECRET).publicKey()
     : '';
 
-  function handleChange(field: string, value: string) {
+  function handleChange(field: string, value: string | boolean) {
     setFormData(prev => ({ ...prev, [field]: value }));
+  }
+
+  async function checkExistingLiquidity() {
+    if (!ISSUER_ADDRESS) return;
+
+    setAggregatorStatus('🔍 Discovering existing liquidity sources...');
+    
+    try {
+      const platAsset = getPlatAsset(ISSUER_ADDRESS);
+      const assetB = formData.assetBCode === 'XLM' 
+        ? getNativeAsset()
+        : new StellarSDK.Asset(formData.assetBCode, formData.assetBIssuer);
+
+      const sources = await discoverLiquiditySources(platAsset, assetB, 'testnet');
+      setDiscoveredSources(sources.length);
+      
+      if (sources.length > 0) {
+        const totalTVL = sources.reduce((sum, s) => sum + s.tvl, 0);
+        setAggregatorStatus(`✅ Found ${sources.length} liquidity source(s) with total TVL: $${totalTVL.toFixed(2)}`);
+        
+        // Get aggregated price
+        const priceData = await getAggregatedPrice(platAsset, assetB, 'testnet');
+        if (priceData.price > 0) {
+          setAggregatorStatus(prev => 
+            `${prev}\n💰 Aggregated Price: ${priceData.price.toFixed(6)} ${formData.assetBCode} per PLAT`
+          );
+        }
+      } else {
+        setAggregatorStatus('ℹ️  No existing liquidity sources found. This will be the first pool!');
+      }
+    } catch (error) {
+      console.error('Error checking liquidity:', error);
+      setAggregatorStatus('⚠️  Could not check existing liquidity');
+    }
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -44,9 +88,10 @@ export default function CreatePoolPage() {
     }
 
     setLoading(true);
+    setAggregatorStatus('');
 
     try {
-      console.log('Creating liquidity pool...');
+      console.log('🚀 Creating liquidity pool...');
 
       // Create asset objects
       const platAsset = getPlatAsset(ISSUER_ADDRESS);
@@ -57,9 +102,11 @@ export default function CreatePoolPage() {
       // Generate pool ID
       const poolId = getLiquidityPoolId(platAsset, assetB, Number(formData.feePercent) * 100);
       
-      console.log('Generated Pool ID:', poolId);
+      console.log('📝 Generated Pool ID:', poolId);
 
-      // Create pool record in database
+      // Step 1: Create pool record in database
+      setAggregatorStatus('📝 Creating pool record in database...');
+      
       const { data: poolData, error: poolError } = await supabase
         .from('liquidity_pools')
         .insert({
@@ -84,16 +131,68 @@ export default function CreatePoolPage() {
         throw poolError;
       }
 
-      console.log('Pool created in database:', poolData);
+      console.log('✅ Pool created in database:', poolData);
+      setAggregatorStatus('✅ Pool record created successfully');
 
-      alert(`✅ Liquidity Pool Created!\n\nPool ID: ${poolId.substring(0, 16)}...\n\nPair: PLAT/${formData.assetBCode}\nFee: ${formData.feePercent}%\n\nYou can now add liquidity to this pool!`);
+      // Step 2: Bootstrap liquidity if enabled
+      if (formData.enableBootstrap && parseFloat(formData.bootstrapAmount) > 0) {
+        setAggregatorStatus('🔍 Discovering liquidity sources for bootstrapping...');
+        setShowAggregatorDetails(true);
+        
+        const targetLiquidity = parseFloat(formData.bootstrapAmount);
+        
+        try {
+          const bootstrapResult = await triggerInitialLiquidity(
+            poolId,
+            ISSUER_ADDRESS,
+            'PLAT',
+            formData.assetBCode,
+            targetLiquidity,
+            'testnet'
+          );
 
-      // Redirect to add liquidity page
-      router.push(`/liquidity/add/${poolData.id}`);
+          if (bootstrapResult.success) {
+            setAggregatorStatus(`✅ ${bootstrapResult.message}`);
+            
+            if (bootstrapResult.details) {
+              const details = bootstrapResult.details;
+              setAggregatorStatus(prev => 
+                `${prev}\n\n💧 Liquidity Plan:\n` +
+                `   PLAT: ${details.liquidityAdded.assetA.toFixed(7)}\n` +
+                `   ${formData.assetBCode}: ${details.liquidityAdded.assetB.toFixed(7)}\n` +
+                `   Sources: ${details.sourcesUsed.length}`
+              );
+            }
+          } else {
+            setAggregatorStatus(`ℹ️  ${bootstrapResult.message}\n\nPool created successfully without bootstrapping.`);
+          }
+        } catch (bootstrapError: any) {
+          console.error('Bootstrap error:', bootstrapError);
+          setAggregatorStatus(`⚠️  Bootstrapping failed: ${bootstrapError.message}\n\nPool created successfully. You can add liquidity manually.`);
+        }
+      }
+
+      // Success message
+      const finalMessage = `✅ Liquidity Pool Created Successfully!\n\n` +
+        `Pool ID: ${poolId.substring(0, 16)}...\n` +
+        `Pair: PLAT/${formData.assetBCode}\n` +
+        `Fee: ${formData.feePercent}%\n\n` +
+        (formData.enableBootstrap 
+          ? `Liquidity aggregator was triggered. Check the details above.\n\n`
+          : '') +
+        `You can now add liquidity to this pool!`;
+
+      alert(finalMessage);
+
+      // Wait a moment to show aggregator status
+      setTimeout(() => {
+        router.push(`/liquidity/add/${poolData.id}`);
+      }, 2000);
 
     } catch (error: any) {
-      console.error('Pool creation failed:', error);
+      console.error('❌ Pool creation failed:', error);
       alert('❌ Failed to create pool: ' + error.message);
+      setAggregatorStatus('❌ Pool creation failed');
     } finally {
       setLoading(false);
     }
@@ -158,9 +257,21 @@ export default function CreatePoolPage() {
           </Link>
           <h1 className="text-3xl font-bold text-gray-900">Create Liquidity Pool</h1>
           <p className="mt-2 text-gray-600">
-            Create a new PLAT trading pair and earn fees from trades
+            Create a new PLAT trading pair with automatic liquidity aggregation
           </p>
         </div>
+
+        {/* Liquidity Aggregator Status */}
+        {showAggregatorDetails && aggregatorStatus && (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-6 mb-6">
+            <h3 className="text-lg font-semibold text-blue-900 mb-3">
+              🤖 Liquidity Aggregator Status
+            </h3>
+            <pre className="text-sm text-blue-800 whitespace-pre-wrap font-mono">
+              {aggregatorStatus}
+            </pre>
+          </div>
+        )}
 
         <div className="bg-white rounded-lg shadow-md p-6">
           <form onSubmit={handleSubmit} className="space-y-6">
@@ -257,15 +368,77 @@ export default function CreatePoolPage() {
               </p>
             </div>
 
+            {/* Liquidity Aggregator Settings */}
+            <div className="border-t border-gray-200 pt-6">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900">🤖 Liquidity Aggregator</h3>
+                  <p className="text-sm text-gray-600 mt-1">
+                    Automatically bootstrap liquidity from existing sources
+                  </p>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={formData.enableBootstrap}
+                    onChange={(e) => handleChange('enableBootstrap', e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                </label>
+              </div>
+
+              {formData.enableBootstrap && (
+                <div className="space-y-4 pl-4 border-l-2 border-blue-200">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Target Initial Liquidity (USD)
+                    </label>
+                    <input
+                      type="number"
+                      value={formData.bootstrapAmount}
+                      onChange={(e) => handleChange('bootstrapAmount', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      placeholder="1000"
+                      min="100"
+                      step="100"
+                    />
+                    <p className="mt-1 text-xs text-gray-500">
+                      Minimum recommended: $1,000 for healthy pool operation
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={checkExistingLiquidity}
+                    className="w-full px-4 py-2 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg font-medium hover:bg-blue-100 transition-colors"
+                  >
+                    🔍 Check Existing Liquidity Sources
+                  </button>
+
+                  {discoveredSources > 0 && (
+                    <div className="bg-green-50 border border-green-200 rounded-lg p-3">
+                      <p className="text-sm text-green-800">
+                        ✅ Found {discoveredSources} existing liquidity source(s) that can be used for bootstrapping
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* Info Box */}
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
               <h3 className="text-sm font-semibold text-blue-900 mb-2">
-                📋 Pool Creation Details
+                📋 Pool Creation Process
               </h3>
               <ul className="text-sm text-blue-800 space-y-1">
                 <li>• Pool Pair: PLAT / {formData.assetBCode}</li>
                 <li>• Trading Fee: {formData.feePercent}% per trade</li>
-                <li>• You will be the first liquidity provider</li>
+                <li>• You will be the pool creator</li>
+                {formData.enableBootstrap && (
+                  <li>• 🤖 Liquidity aggregator will attempt to bootstrap with ${formData.bootstrapAmount}</li>
+                )}
                 <li>• After creation, you can add initial liquidity</li>
                 <li>• Pool uses Stellar's native AMM protocol</li>
               </ul>
@@ -277,10 +450,10 @@ export default function CreatePoolPage() {
                 ⚠️ Important Notes
               </h3>
               <ul className="text-sm text-yellow-800 space-y-1">
-                <li>• You must add liquidity immediately after creating the pool</li>
+                <li>• Pool creation is instant but requires network fees (~0.00001 XLM)</li>
+                <li>• Liquidity aggregator runs automatically if enabled</li>
+                <li>• You can manually add liquidity after pool creation</li>
                 <li>• Ensure you have both PLAT and {formData.assetBCode} in your wallet</li>
-                <li>• Pool creation does not require a transaction fee</li>
-                <li>• Adding liquidity will require Stellar network fees (~0.00001 XLM)</li>
               </ul>
             </div>
 
@@ -297,31 +470,20 @@ export default function CreatePoolPage() {
                 disabled={loading}
                 className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
               >
-                {loading ? 'Creating Pool...' : 'Create Pool'}
+                {loading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                    Creating Pool...
+                  </span>
+                ) : (
+                  '🚀 Create Pool'
+                )}
               </button>
             </div>
           </form>
-        </div>
-
-        {/* Additional Info */}
-        <div className="mt-6 bg-white rounded-lg shadow-md p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-3">
-            💡 How Liquidity Pools Work
-          </h2>
-          <div className="space-y-3 text-sm text-gray-600">
-            <p>
-              <strong>1. Create Pool:</strong> Define the trading pair and fee structure
-            </p>
-            <p>
-              <strong>2. Add Liquidity:</strong> Deposit equal value of both tokens to start the pool
-            </p>
-            <p>
-              <strong>3. Earn Fees:</strong> Receive a portion of trading fees proportional to your share
-            </p>
-            <p>
-              <strong>4. Manage Position:</strong> Add or remove liquidity anytime
-            </p>
-          </div>
         </div>
       </div>
     </div>

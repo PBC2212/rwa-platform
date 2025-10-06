@@ -1,65 +1,51 @@
-// lib/stellar/liquidity.ts
-import * as StellarSDK from '@stellar/stellar-sdk';
+import * as StellarSdk from '@stellar/stellar-sdk';
 
-export interface LiquidityPoolParams {
-  assetA: StellarSDK.Asset;
-  assetB: StellarSDK.Asset;
-  fee: number; // basis points (30 = 0.3%)
+const TESTNET_URL = 'https://horizon-testnet.stellar.org';
+const MAINNET_URL = 'https://horizon.stellar.org';
+
+export function getStellarServer(network: 'testnet' | 'mainnet' = 'testnet') {
+  const url = network === 'mainnet' ? MAINNET_URL : TESTNET_URL;
+  return new StellarSdk.Horizon.Server(url);
 }
 
-export interface DepositLiquidityParams {
-  poolId: string;
-  maxAssetAAmount: string;
-  maxAssetBAmount: string;
-  minPrice: string;
-  maxPrice: string;
+export function getNetworkPassphrase(network: 'testnet' | 'mainnet' = 'testnet') {
+  return network === 'mainnet' 
+    ? StellarSdk.Networks.PUBLIC 
+    : StellarSdk.Networks.TESTNET;
 }
 
-export interface WithdrawLiquidityParams {
-  poolId: string;
-  shareAmount: string;
-  minAssetAAmount: string;
-  minAssetBAmount: string;
+export interface PoolParams {
+  assetA: StellarSdk.Asset;
+  assetB: StellarSdk.Asset;
+  fee: number;
 }
 
-// Get Stellar server
-export const getStellarServer = (network: 'testnet' | 'mainnet' = 'testnet') => {
-  const horizonUrl = network === 'testnet' 
-    ? 'https://horizon-testnet.stellar.org'
-    : 'https://horizon.stellar.org';
+export interface LiquidityPoolInfo {
+  id: string;
+  fee_bp: number;
+  type: string;
+  total_trustlines: string;
+  total_shares: string;
+  reserves: Array<{
+    asset: string;
+    amount: string;
+  }>;
+}
+
+export function getLiquidityPoolId(params: PoolParams): string {
+  const liquidityPoolAsset = new StellarSdk.LiquidityPoolAsset(
+    params.assetA,
+    params.assetB,
+    params.fee
+  );
   
-  return new StellarSDK.Horizon.Server(horizonUrl);
-};
+  return liquidityPoolAsset.getLiquidityPoolId();
+}
 
-// Create a liquidity pool ID from two assets
-export const getLiquidityPoolId = (
-  assetA: StellarSDK.Asset,
-  assetB: StellarSDK.Asset,
-  fee: number = 30
-): string => {
-  // Stellar requires assets to be in lexicographic order
-  // Compare assets and sort them
-  const sortedAssets = [assetA, assetB].sort((a, b) => {
-    const aStr = a.isNative() ? 'native' : `${a.getCode()}:${a.getIssuer()}`;
-    const bStr = b.isNative() ? 'native' : `${b.getCode()}:${b.getIssuer()}`;
-    return aStr.localeCompare(bStr);
-  });
-
-  return StellarSDK.getLiquidityPoolId(
-    'constant_product',
-    {
-      assetA: sortedAssets[0],
-      assetB: sortedAssets[1],
-      fee: fee
-    }
-  ).toString('hex');
-};
-
-// Check if liquidity pool exists on Stellar
-export const checkPoolExists = async (
+export async function checkPoolExists(
   poolId: string,
   network: 'testnet' | 'mainnet' = 'testnet'
-): Promise<boolean> => {
+): Promise<boolean> {
   try {
     const server = getStellarServer(network);
     await server.liquidityPools().liquidityPoolId(poolId).call();
@@ -67,271 +53,386 @@ export const checkPoolExists = async (
   } catch (error) {
     return false;
   }
-};
+}
 
-// Get liquidity pool details from Stellar
-export const getPoolInfo = async (
-  poolId: string,
+export async function createLiquidityPool(
+  secretKey: string,
+  params: PoolParams,
   network: 'testnet' | 'mainnet' = 'testnet'
-): Promise<any> => {
+): Promise<{ success: boolean; poolId: string; txHash?: string; error?: string }> {
+  try {
+    const server = getStellarServer(network);
+    const sourceKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+    const sourceAccount = await server.loadAccount(sourceKeypair.publicKey());
+
+    const liquidityPoolAsset = new StellarSdk.LiquidityPoolAsset(
+      params.assetA,
+      params.assetB,
+      params.fee
+    );
+
+    const poolId = liquidityPoolAsset.getLiquidityPoolId();
+    console.log('Creating liquidity pool with ID:', poolId);
+
+    const poolExists = await checkPoolExists(poolId, network);
+    if (poolExists) {
+      console.log('Pool already exists, skipping creation');
+      return { success: true, poolId };
+    }
+
+    const changeTrustOp = StellarSdk.Operation.changeTrust({
+      asset: liquidityPoolAsset,
+      limit: '1000000'
+    });
+
+    const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: getNetworkPassphrase(network),
+    })
+      .addOperation(changeTrustOp)
+      .setTimeout(180)
+      .build();
+
+    transaction.sign(sourceKeypair);
+
+    const result = await server.submitTransaction(transaction);
+    console.log('Pool creation transaction successful:', result.hash);
+
+    return {
+      success: true,
+      poolId,
+      txHash: result.hash
+    };
+
+  } catch (error: any) {
+    console.error('Error creating liquidity pool:', error);
+    return {
+      success: false,
+      poolId: '',
+      error: error.message || 'Unknown error'
+    };
+  }
+}
+
+export async function depositLiquidity(
+  secretKey: string,
+  poolId: string,
+  maxAmountA: string,
+  maxAmountB: string,
+  minPrice: string,
+  maxPrice: string,
+  network: 'testnet' | 'mainnet' = 'testnet'
+): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  try {
+    const server = getStellarServer(network);
+    const sourceKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+    const sourceAccount = await server.loadAccount(sourceKeypair.publicKey());
+
+    const depositOp = StellarSdk.Operation.liquidityPoolDeposit({
+      liquidityPoolId: poolId,
+      maxAmountA,
+      maxAmountB,
+      minPrice: { n: parseInt(minPrice), d: 1 },
+      maxPrice: { n: parseInt(maxPrice), d: 1 }
+    });
+
+    const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: getNetworkPassphrase(network),
+    })
+      .addOperation(depositOp)
+      .setTimeout(180)
+      .build();
+
+    transaction.sign(sourceKeypair);
+
+    const result = await server.submitTransaction(transaction);
+    console.log('Liquidity deposit successful:', result.hash);
+
+    return {
+      success: true,
+      txHash: result.hash
+    };
+
+  } catch (error: any) {
+    console.error('Error depositing liquidity:', error);
+    return {
+      success: false,
+      error: error.message || 'Unknown error'
+    };
+  }
+}
+
+export async function withdrawLiquidity(
+  secretKey: string,
+  poolId: string,
+  amount: string,
+  minAmountA: string,
+  minAmountB: string,
+  network: 'testnet' | 'mainnet' = 'testnet'
+): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  try {
+    const server = getStellarServer(network);
+    const sourceKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+    const sourceAccount = await server.loadAccount(sourceKeypair.publicKey());
+
+    const withdrawOp = StellarSdk.Operation.liquidityPoolWithdraw({
+      liquidityPoolId: poolId,
+      amount,
+      minAmountA,
+      minAmountB
+    });
+
+    const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: getNetworkPassphrase(network),
+    })
+      .addOperation(withdrawOp)
+      .setTimeout(180)
+      .build();
+
+    transaction.sign(sourceKeypair);
+
+    const result = await server.submitTransaction(transaction);
+    console.log('Liquidity withdrawal successful:', result.hash);
+
+    return {
+      success: true,
+      txHash: result.hash
+    };
+
+  } catch (error: any) {
+    console.error('Error withdrawing liquidity:', error);
+    return {
+      success: false,
+      error: error.message || 'Unknown error'
+    };
+  }
+}
+
+export async function getUserLiquidityPositions(
+  publicKey: string,
+  network: 'testnet' | 'mainnet' = 'testnet'
+): Promise<any[]> {
+  try {
+    const server = getStellarServer(network);
+    const account = await server.loadAccount(publicKey);
+    
+    const liquidityPoolBalances = account.balances.filter(
+      (balance: any) => balance.asset_type === 'liquidity_pool_shares'
+    );
+
+    const positions = [];
+    
+    for (const balance of liquidityPoolBalances) {
+      try {
+        const poolInfo = await server
+          .liquidityPools()
+          .liquidityPoolId(balance.liquidity_pool_id)
+          .call();
+        
+        positions.push({
+          poolId: balance.liquidity_pool_id,
+          shares: balance.balance,
+          poolInfo
+        });
+      } catch (error) {
+        console.error('Error fetching pool info:', error);
+      }
+    }
+
+    return positions;
+  } catch (error: any) {
+    console.error('Error fetching user liquidity positions:', error);
+    return [];
+  }
+}
+
+export async function getPoolInfo(poolId: string, network: 'testnet' | 'mainnet' = 'testnet') {
   try {
     const server = getStellarServer(network);
     const pool = await server.liquidityPools().liquidityPoolId(poolId).call();
     return pool;
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.response?.status === 404 || error?.name === 'NotFoundError') {
+      console.log('Pool not found (may not exist yet):', poolId);
+      return null;
+    }
     console.error('Error fetching pool info:', error);
-    throw new Error('Failed to fetch pool information');
+    throw error;
   }
-};
+}
 
-// Build transaction to deposit liquidity
-export const buildDepositLiquidityTransaction = async (
-  sourceAddress: string,
-  params: DepositLiquidityParams,
-  network: 'testnet' | 'mainnet' = 'testnet'
-): Promise<string> => {
-  const server = getStellarServer(network);
-  const networkPassphrase = network === 'testnet' 
-    ? StellarSDK.Networks.TESTNET 
-    : StellarSDK.Networks.PUBLIC;
-
+export async function getAllLiquidityPools(
+  network: 'testnet' | 'mainnet' = 'testnet',
+  limit: number = 200
+): Promise<any[]> {
   try {
-    const sourceAccount = await server.loadAccount(sourceAddress);
-
-    const transaction = new StellarSDK.TransactionBuilder(sourceAccount, {
-      fee: StellarSDK.BASE_FEE,
-      networkPassphrase: networkPassphrase,
-    })
-      .addOperation(
-        StellarSDK.Operation.liquidityPoolDeposit({
-          liquidityPoolId: params.poolId,
-          maxAmountA: params.maxAssetAAmount,
-          maxAmountB: params.maxAssetBAmount,
-          minPrice: { n: 1, d: 1 }, // Simplified price ratio
-          maxPrice: { n: 1, d: 1 },
-        })
-      )
-      .setTimeout(300)
-      .build();
-
-    return transaction.toXDR();
-  } catch (error) {
-    console.error('Error building deposit transaction:', error);
-    throw new Error('Failed to build deposit transaction');
+    const server = getStellarServer(network);
+    const response = await server
+      .liquidityPools()
+      .limit(limit)
+      .order('desc')
+      .call();
+    
+    return response.records;
+  } catch (error: any) {
+    console.error('Error fetching all liquidity pools:', error);
+    return [];
   }
-};
+}
 
-// Build transaction to withdraw liquidity
-export const buildWithdrawLiquidityTransaction = async (
-  sourceAddress: string,
-  params: WithdrawLiquidityParams,
+export async function swapAssets(
+  secretKey: string,
+  sendAsset: StellarSdk.Asset,
+  sendAmount: string,
+  destAsset: StellarSdk.Asset,
+  destMin: string,
+  path: StellarSdk.Asset[] = [],
   network: 'testnet' | 'mainnet' = 'testnet'
-): Promise<string> => {
-  const server = getStellarServer(network);
-  const networkPassphrase = network === 'testnet' 
-    ? StellarSDK.Networks.TESTNET 
-    : StellarSDK.Networks.PUBLIC;
-
+): Promise<{ success: boolean; txHash?: string; error?: string }> {
   try {
-    const sourceAccount = await server.loadAccount(sourceAddress);
+    const server = getStellarServer(network);
+    const sourceKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+    const sourceAccount = await server.loadAccount(sourceKeypair.publicKey());
 
-    const transaction = new StellarSDK.TransactionBuilder(sourceAccount, {
-      fee: StellarSDK.BASE_FEE,
-      networkPassphrase: networkPassphrase,
-    })
-      .addOperation(
-        StellarSDK.Operation.liquidityPoolWithdraw({
-          liquidityPoolId: params.poolId,
-          amount: params.shareAmount,
-          minAmountA: params.minAssetAAmount,
-          minAmountB: params.minAssetBAmount,
-        })
-      )
-      .setTimeout(300)
-      .build();
-
-    return transaction.toXDR();
-  } catch (error) {
-    console.error('Error building withdraw transaction:', error);
-    throw new Error('Failed to build withdraw transaction');
-  }
-};
-
-// Build transaction to change trust (required before depositing to a pool)
-export const buildChangeTrustTransaction = async (
-  sourceAddress: string,
-  assetA: StellarSDK.Asset,
-  assetB: StellarSDK.Asset,
-  fee: number = 30,
-  network: 'testnet' | 'mainnet' = 'testnet'
-): Promise<string> => {
-  const server = getStellarServer(network);
-  const networkPassphrase = network === 'testnet' 
-    ? StellarSDK.Networks.TESTNET 
-    : StellarSDK.Networks.PUBLIC;
-
-  try {
-    const sourceAccount = await server.loadAccount(sourceAddress);
-
-    // Sort assets in lexicographic order
-    const sortedAssets = [assetA, assetB].sort((a, b) => {
-      const aStr = a.isNative() ? 'native' : `${a.getCode()}:${a.getIssuer()}`;
-      const bStr = b.isNative() ? 'native' : `${b.getCode()}:${b.getIssuer()}`;
-      return aStr.localeCompare(bStr);
+    const pathPaymentOp = StellarSdk.Operation.pathPaymentStrictSend({
+      sendAsset,
+      sendAmount,
+      destination: sourceKeypair.publicKey(),
+      destAsset,
+      destMin,
+      path
     });
 
-    // Create liquidity pool asset
-    const lpAsset = new StellarSDK.LiquidityPoolAsset(
-      sortedAssets[0],
-      sortedAssets[1],
-      StellarSDK.LiquidityPoolFeeV18
-    );
-
-    const transaction = new StellarSDK.TransactionBuilder(sourceAccount, {
-      fee: StellarSDK.BASE_FEE,
-      networkPassphrase: networkPassphrase,
+    const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: getNetworkPassphrase(network),
     })
-      .addOperation(
-        StellarSDK.Operation.changeTrust({
-          asset: lpAsset,
-        })
-      )
-      .setTimeout(300)
+      .addOperation(pathPaymentOp)
+      .setTimeout(180)
       .build();
 
-    return transaction.toXDR();
-  } catch (error) {
-    console.error('Error building change trust transaction:', error);
-    throw new Error('Failed to build change trust transaction');
-  }
-};
+    transaction.sign(sourceKeypair);
 
-// Submit signed transaction to Stellar
-export const submitTransaction = async (
-  signedXDR: string,
-  network: 'testnet' | 'mainnet' = 'testnet'
-): Promise<any> => {
-  const server = getStellarServer(network);
+    const result = await server.submitTransaction(transaction);
+    console.log('Swap successful:', result.hash);
 
-  try {
-    const transaction = StellarSDK.TransactionBuilder.fromXDR(
-      signedXDR,
-      network === 'testnet' ? StellarSDK.Networks.TESTNET : StellarSDK.Networks.PUBLIC
-    );
+    return {
+      success: true,
+      txHash: result.hash
+    };
 
-    const result = await server.submitTransaction(transaction as any);
-    return result;
   } catch (error: any) {
-    console.error('Transaction submission error:', error);
-    throw new Error('Failed to submit transaction: ' + error.message);
+    console.error('Error performing swap:', error);
+    return {
+      success: false,
+      error: error.message || 'Unknown error'
+    };
   }
-};
+}
 
-// Get user's liquidity pool balances
-export const getUserPoolBalances = async (
-  walletAddress: string,
+export async function findBestSwapPath(
+  sourceAsset: StellarSdk.Asset,
+  destAsset: StellarSdk.Asset,
+  amount: string,
   network: 'testnet' | 'mainnet' = 'testnet'
-): Promise<any[]> => {
-  const server = getStellarServer(network);
-
+): Promise<any> {
   try {
-    const account = await server.loadAccount(walletAddress);
+    const server = getStellarServer(network);
     
-    const poolBalances = account.balances.filter(
-      (balance: any) => balance.asset_type === 'liquidity_pool_shares'
-    );
+    const paths = await server
+      .strictSendPaths(sourceAsset, amount, [destAsset])
+      .call();
 
-    return poolBalances;
-  } catch (error) {
-    console.error('Error fetching pool balances:', error);
-    throw new Error('Failed to fetch pool balances');
+    if (paths.records.length === 0) {
+      return null;
+    }
+
+    const bestPath = paths.records.reduce((best: any, current: any) => {
+      const bestAmount = parseFloat(best.destination_amount);
+      const currentAmount = parseFloat(current.destination_amount);
+      return currentAmount > bestAmount ? current : best;
+    });
+
+    return bestPath;
+  } catch (error: any) {
+    console.error('Error finding swap path:', error);
+    return null;
   }
-};
+}
 
-// Calculate pool share percentage
-export const calculateSharePercentage = (
-  userShares: number,
-  totalShares: number
-): number => {
-  if (totalShares === 0) return 0;
-  return (userShares / totalShares) * 100;
-};
-
-// Calculate estimated output for deposit
-export const calculateDepositOutput = (
-  assetAAmount: number,
-  assetBAmount: number,
-  poolAssetAReserve: number,
-  poolAssetBReserve: number,
-  totalShares: number
-): number => {
-  if (totalShares === 0) {
-    // First deposit - shares equal to geometric mean
-    return Math.sqrt(assetAAmount * assetBAmount);
-  }
-
-  // Subsequent deposits - proportional to existing pool
-  const shareFromA = (assetAAmount / poolAssetAReserve) * totalShares;
-  const shareFromB = (assetBAmount / poolAssetBReserve) * totalShares;
+export function calculatePoolPrice(reserve0: string, reserve1: string): number {
+  const r0 = parseFloat(reserve0);
+  const r1 = parseFloat(reserve1);
   
-  return Math.min(shareFromA, shareFromB);
-};
+  if (r0 === 0) return 0;
+  return r1 / r0;
+}
 
-// Calculate estimated output for withdrawal
-export const calculateWithdrawOutput = (
-  shares: number,
-  totalShares: number,
-  poolAssetAReserve: number,
-  poolAssetBReserve: number
-): { assetA: number; assetB: number } => {
-  if (totalShares === 0) {
-    return { assetA: 0, assetB: 0 };
-  }
-
-  const sharePercentage = shares / totalShares;
+export function calculateLiquidityValue(
+  shares: string,
+  totalShares: string,
+  reserves: Array<{ amount: string }>
+): { value0: number; value1: number } {
+  const userShares = parseFloat(shares);
+  const total = parseFloat(totalShares);
+  
+  if (total === 0) return { value0: 0, value1: 0 };
+  
+  const share = userShares / total;
   
   return {
-    assetA: sharePercentage * poolAssetAReserve,
-    assetB: sharePercentage * poolAssetBReserve,
+    value0: parseFloat(reserves[0].amount) * share,
+    value1: parseFloat(reserves[1].amount) * share
   };
-};
+}
 
-// Check if user has trustline to pool
-export const hasPoolTrustline = async (
-  walletAddress: string,
-  poolId: string,
+export async function getAssetPrice(
+  asset: StellarSdk.Asset,
+  baseAsset: StellarSdk.Asset,
   network: 'testnet' | 'mainnet' = 'testnet'
-): Promise<boolean> => {
-  const server = getStellarServer(network);
-
+): Promise<number | null> {
   try {
-    const account = await server.loadAccount(walletAddress);
+    const server = getStellarServer(network);
     
-    const hasTrustline = account.balances.some(
-      (balance: any) => 
-        balance.asset_type === 'liquidity_pool_shares' && 
-        balance.liquidity_pool_id === poolId
-    );
+    const orderbook = await server
+      .orderbook(asset, baseAsset)
+      .call();
 
-    return hasTrustline;
-  } catch (error) {
-    console.error('Error checking trustline:', error);
-    return false;
+    if (orderbook.bids.length === 0) return null;
+    
+    const topBid = orderbook.bids[0];
+    return parseFloat(topBid.price);
+  } catch (error: any) {
+    console.error('Error fetching asset price:', error);
+    return null;
   }
-};
+}
 
-// Format pool ID for display (first 8 and last 8 characters)
-export const formatPoolId = (poolId: string): string => {
-  if (poolId.length <= 16) return poolId;
-  return `${poolId.substring(0, 8)}...${poolId.substring(poolId.length - 8)}`;
-};
+export function calculateSwapOutput(
+  inputAmount: number,
+  inputReserve: number,
+  outputReserve: number,
+  feeBps: number = 30
+): number {
+  const feeMultiplier = (10000 - feeBps) / 10000;
+  const inputWithFee = inputAmount * feeMultiplier;
+  const numerator = inputWithFee * outputReserve;
+  const denominator = inputReserve + inputWithFee;
+  return numerator / denominator;
+}
 
-// Get PLAT asset object
-export const getPlatAsset = (issuerAddress: string): StellarSDK.Asset => {
-  return new StellarSDK.Asset('PLAT', issuerAddress);
-};
+export function calculateSpotPrice(reserve0: string, reserve1: string): number {
+  return calculatePoolPrice(reserve0, reserve1);
+}
 
-// Get native XLM asset object
-export const getNativeAsset = (): StellarSDK.Asset => {
-  return StellarSDK.Asset.native();
-};
+export function getPlatAsset(issuerPublicKey: string): StellarSdk.Asset {
+  return new StellarSdk.Asset('PLAT', issuerPublicKey);
+}
+
+export function getNativeAsset(): StellarSdk.Asset {
+  return StellarSdk.Asset.native();
+}
+
+export { StellarSdk };

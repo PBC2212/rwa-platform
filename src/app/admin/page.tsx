@@ -46,7 +46,7 @@ export default function AdminPage() {
 
       const { data, error } = await supabase.rpc('is_admin', {
         _user_id: user!.id
-      });
+      } as any);
 
       clearTimeout(timeoutId);
 
@@ -104,6 +104,7 @@ export default function AdminPage() {
     try {
       console.log('Starting approval process for:', pledgeRequest.id);
 
+      // @ts-ignore - Supabase type inference issue
       const { error: updateError } = await supabase
         .from('pledge_requests')
         .update({ status: 'approved' })
@@ -227,6 +228,7 @@ export default function AdminPage() {
     setProcessing(pledgeRequest.id);
 
     try {
+      // @ts-ignore - Supabase type inference issue
       const { error } = await supabase
         .from('pledge_requests')
         .update({ status: 'rejected' })
@@ -289,7 +291,7 @@ export default function AdminPage() {
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="max-w-md w-full bg-white rounded-lg shadow-md p-8 text-center">
           <h2 className="text-2xl font-bold text-gray-900 mb-4">Access Denied</h2>
-          <p className="text-gray-600 mb-6">You don't have admin privileges to access this page.</p>
+          <p className="text-gray-600 mb-6">You do not have admin privileges to access this page.</p>
           {adminCheckError && (
             <p className="text-sm text-red-600 mb-4">Error: {adminCheckError}</p>
           )}
